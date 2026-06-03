@@ -158,7 +158,7 @@ def get_fireflies_summary(call_date):
 # ── Slack ────────────────────────────────────────────────────────────────────
 def post_to_slack(youtube_url, fireflies_url, call_date, summary, keywords):
     themes = ", ".join(keywords) if keywords else ""
-    message = f"📹 *Recording {call_date}:*\n{youtube_url}"
+    message = f"📹 Recording {call_date}:\n{youtube_url}"
     if themes:
         message += f"\n\nSome themes: {themes}"
     if summary:
@@ -226,8 +226,19 @@ def process_recording(payload):
             log.info(f"Skipping: duration {duration}m < {MIN_DURATION_MINUTES}m minimum")
             return
 
-        start_time = meeting.get("start_time", "")[:10]  # YYYY-MM-DD
-        call_date_display = meeting.get("start_time", "")[:10]
+        # Convert UTC start time to Pacific time for display
+        from datetime import timezone
+        import pytz
+        utc_start = meeting.get("start_time", "")
+        try:
+            dt_utc = datetime.strptime(utc_start, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            pacific = pytz.timezone("America/Los_Angeles")
+            dt_pacific = dt_utc.astimezone(pacific)
+            start_time = dt_pacific.strftime("%Y-%m-%d")
+            call_date_display = dt_pacific.strftime("%B %-d, %Y")  # e.g. "June 2, 2026"
+        except Exception:
+            start_time = utc_start[:10]
+            call_date_display = utc_start[:10]
 
         # Find the MP4 recording file
         recording_files = meeting.get("recording_files", [])
