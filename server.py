@@ -33,6 +33,22 @@ def env(key, default=None):
 PERSONAL_ROOM_TOPIC  = os.environ.get("PERSONAL_ROOM_TOPIC", "Jason Crouse's Personal Meeting Room")
 MIN_DURATION_MINUTES = int(os.environ.get("MIN_DURATION_MINUTES", "90"))
 
+# ── Zoom OAuth token ────────────────────────────────────────────────────────
+def get_zoom_token():
+    """Get a Server-to-Server OAuth token for Zoom API calls."""
+    import base64
+    account_id  = env("ZOOM_ACCOUNT_ID")
+    client_id   = env("ZOOM_CLIENT_ID")
+    client_secret = env("ZOOM_CLIENT_SECRET")
+    credentials = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+    r = requests.post(
+        f"https://zoom.us/oauth/token?grant_type=account_credentials&account_id={account_id}",
+        headers={"Authorization": f"Basic {credentials}"}
+    )
+    r.raise_for_status()
+    return r.json()["access_token"]
+
+
 # ── Zoom webhook verification ────────────────────────────────────────────────
 def verify_zoom_signature(request):
     """Validate Zoom webhook signature."""
@@ -162,14 +178,26 @@ def process_recording(payload):
 
         # Download MP4 to temp file
         log.info(f"Downloading recording for {call_date_display}...")
+        zoom_token = get_zoom_token()
+        log.info("Got Zoom OAuth token")
+
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             tmp_path = tmp.name
 
-        with requests.get(download_url, stream=True, timeout=600) as r:
+        with requests.get(download_url, stream=True, timeout=600,
+                          headers={"Authorization": f"Bearer {zoom_token}"}) as r:
+            log.info(f"Download response: {r.status_code}, Content-Type: {r.headers.get('Content-Type')}, Content-Length: {r.headers.get('Content-Length')}")
             r.raise_for_status()
+            content_type = r.headers.get('Content-Type', '')
+            if 'html' in content_type.lower():
+                log.error(f"Got HTML response instead of video — Zoom auth required. Content-Type: {content_type}")
+                return
             with open(tmp_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
+                for chunk in r.iter_content(chunk_size=65536):
                     f.write(chunk)
+
+        file_size = os.path.getsize(tmp_path)
+        log.info(f"Downloaded {file_size} bytes to {tmp_path}")
 
         log.info(f"Downloaded to {tmp_path}, uploading to YouTube...")
 
