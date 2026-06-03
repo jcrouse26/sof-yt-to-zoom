@@ -168,7 +168,7 @@ def post_to_slack(youtube_url, fireflies_url, call_date, summary, keywords):
     r = requests.post(
         "https://slack.com/api/chat.postMessage",
         headers={"Authorization": f"Bearer {env('SLACK_BOT_TOKEN')}"},
-        json={"channel": env("SLACK_CHANNEL_ID"), "text": message},
+        json={"channel": env("SLACK_CHANNEL_ID"), "text": message, "unfurl_links": False, "unfurl_media": False},
     )
     data = r.json()
     if not data.get("ok"):
