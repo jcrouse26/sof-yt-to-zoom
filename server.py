@@ -106,11 +106,16 @@ def post_to_slack(youtube_url, fireflies_url, call_date, summary):
         f"📺 *Recording:* {youtube_url}\n"
         f"🔥 *Full Transcript:* {fireflies_url}"
     )
-    requests.post(
+    r = requests.post(
         "https://slack.com/api/chat.postMessage",
         headers={"Authorization": f"Bearer {env('SLACK_BOT_TOKEN')}"},
         json={"channel": env("SLACK_CHANNEL_ID"), "text": message},
     )
+    data = r.json()
+    if not data.get("ok"):
+        log.error(f"Slack post failed: {data}")
+    else:
+        log.info(f"Slack posted to {env('SLACK_CHANNEL_ID')}")
 
 
 # ── Notion ───────────────────────────────────────────────────────────────────
@@ -139,7 +144,11 @@ def update_notion(youtube_url, call_date, summary, keywords):
             ],
         ],
     }
-    requests.post("https://api.notion.com/v1/pages", headers=headers, json=data)
+    r = requests.post("https://api.notion.com/v1/pages", headers=headers, json=data)
+    if r.status_code != 200:
+        log.error(f"Notion update failed: {r.status_code} {r.text}")
+    else:
+        log.info("Notion Flow Code Call Archive updated")
 
 
 # ── Core pipeline ────────────────────────────────────────────────────────────
