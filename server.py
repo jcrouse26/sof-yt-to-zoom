@@ -98,14 +98,73 @@ def upload_to_youtube(file_path, title, description="", privacy="unlisted"):
     return f"https://www.youtube.com/watch?v={response['id']}"
 
 
-# ── Slack ────────────────────────────────────────────────────────────────────
-def post_to_slack(youtube_url, fireflies_url, call_date, summary):
-    message = (
-        f"🎙️ *TFC Group Coaching Call — {call_date}* is now available\n\n"
-        f"*Summary:* {summary}\n\n"
-        f"📺 *Recording:* {youtube_url}\n"
-        f"🔥 *Full Transcript:* {fireflies_url}"
+# ── Fireflies ────────────────────────────────────────────────────────────────
+def get_fireflies_summary(call_date):
+    """Fetch summary and keywords for the group coaching call on a given date."""
+    query = """
+    query($fromDate: String, $toDate: String) {
+      transcripts(fromDate: $fromDate, toDate: $toDate) {
+        id
+        title
+        summary {
+          short_summary
+          keywords
+          bullet_gist
+        }
+      }
+    }
+    """
+    # Look in a 2-day window around the call date
+    from datetime import datetime, timedelta
+    dt = datetime.strptime(call_date, "%Y-%m-%d")
+    from_date = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
+    to_date   = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    r = requests.post(
+        "https://api.fireflies.ai/graphql",
+        headers={"Authorization": f"Bearer {env('FIREFLIES_API_KEY')}",
+                 "Content-Type": "application/json"},
+        json={"query": query, "variables": {"fromDate": from_date, "toDate": to_date}},
+        timeout=30
     )
+    r.raise_for_status()
+    transcripts = r.json().get("data", {}).get("transcripts", [])
+
+    # Find the group coaching call (longest call or title match)
+    group_call = None
+    for t in transcripts:
+        title = (t.get("title") or "").lower()
+        if "group call" in title or "flow code" in title or "group coaching" in title:
+            group_call = t
+            break
+
+    if not group_call and transcripts:
+        group_call = transcripts[0]
+
+    if not group_call or not group_call.get("summary"):
+        log.warning("No Fireflies summary found for this date")
+        return None, [], None
+
+    summary_obj = group_call["summary"]
+    short_summary = summary_obj.get("short_summary", "")
+    keywords      = summary_obj.get("keywords", [])
+    if isinstance(keywords, str):
+        keywords = [k.strip() for k in keywords.split(",")]
+    fireflies_url = f"https://app.fireflies.ai/view/{group_call['id']}"
+    log.info(f"Found Fireflies transcript: {group_call['title']}")
+    return short_summary, keywords, fireflies_url
+
+
+# ── Slack ────────────────────────────────────────────────────────────────────
+def post_to_slack(youtube_url, fireflies_url, call_date, summary, keywords):
+    themes = ", ".join(keywords) if keywords else ""
+    message = f"📹 *Recording {call_date}:*\n{youtube_url}"
+    if themes:
+        message += f"\n\nSome themes: {themes}"
+    if summary:
+        message += f"\n\n{summary}"
+    if fireflies_url:
+        message += f"\n\n🔥 Full transcript: {fireflies_url}"
     r = requests.post(
         "https://slack.com/api/chat.postMessage",
         headers={"Authorization": f"Bearer {env('SLACK_BOT_TOKEN')}"},
@@ -219,13 +278,19 @@ def process_recording(payload):
         # Clean up temp file
         os.unlink(tmp_path)
 
+        # Pull Fireflies summary
+        summary, keywords, fireflies_url = get_fireflies_summary(start_time)
+        if not summary:
+            summary = "Weekly TFC Flow Code Group Coaching Call."
+        if not keywords:
+            keywords = ["Community Support", "Group Coaching", "Flow Code"]
+        if not fireflies_url:
+            fireflies_url = "https://app.fireflies.ai"
+
         # Post to Slack
-        summary = "Weekly TFC group coaching session. Members shared wins, challenges, and received live coaching."
-        fireflies_url = "https://app.fireflies.ai"  # placeholder — Fireflies link added manually if needed
-        post_to_slack(youtube_url, fireflies_url, call_date_display, summary)
+        post_to_slack(youtube_url, fireflies_url, call_date_display, summary, keywords)
 
         # Update Notion
-        keywords = ["Community Support", "Group Coaching", "Flow Code"]
         update_notion(youtube_url, start_time, summary, keywords)
 
         log.info(f"Pipeline complete for {call_date_display}: {youtube_url}")
@@ -250,7 +315,7 @@ def test_notifications():
     fireflies_url = "https://app.fireflies.ai/view/test"
     keywords = ["Test", "Community Support", "Flow Code"]
     try:
-        post_to_slack(youtube_url, fireflies_url, call_date, summary)
+        post_to_slack(youtube_url, fireflies_url, call_date, summary, keywords)
         update_notion(youtube_url, call_date, summary, keywords)
         return jsonify({"status": "ok", "youtube_url": youtube_url})
     except Exception as e:
