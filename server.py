@@ -10,8 +10,12 @@ import hashlib
 import hmac
 import tempfile
 import threading
+import logging
 import requests
 from flask import Flask, request, jsonify
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+log = logging.getLogger(__name__)
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
@@ -132,10 +136,10 @@ def process_recording(payload):
 
         # Only process group coaching calls
         if PERSONAL_ROOM_TOPIC.lower() not in topic.lower():
-            print(f"Skipping: topic '{topic}' doesn't match personal room")
+            log.info(f"Skipping: topic '{topic}' doesn't match personal room")
             return
         if duration < MIN_DURATION_MINUTES:
-            print(f"Skipping: duration {duration}m < {MIN_DURATION_MINUTES}m minimum")
+            log.info(f"Skipping: duration {duration}m < {MIN_DURATION_MINUTES}m minimum")
             return
 
         start_time = meeting.get("start_time", "")[:10]  # YYYY-MM-DD
@@ -151,13 +155,13 @@ def process_recording(payload):
             None
         )
         if not mp4_file:
-            print("No MP4 file found in recording")
+            log.warning("No MP4 file found in recording")
             return
 
         download_url = mp4_file["download_url"]
 
         # Download MP4 to temp file
-        print(f"Downloading recording for {call_date_display}...")
+        log.info(f"Downloading recording for {call_date_display}...")
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             tmp_path = tmp.name
 
@@ -167,13 +171,13 @@ def process_recording(payload):
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
 
-        print(f"Downloaded to {tmp_path}, uploading to YouTube...")
+        log.info(f"Downloaded to {tmp_path}, uploading to YouTube...")
 
         # Upload to YouTube
         title = f"TFC Group Coaching Call — {call_date_display}"
         description = "Weekly TFC Flow Code Group Coaching Call"
         youtube_url = upload_to_youtube(tmp_path, title, description)
-        print(f"YouTube URL: {youtube_url}")
+        log.info(f"YouTube URL: {youtube_url}")
 
         # Clean up temp file
         os.unlink(tmp_path)
@@ -187,10 +191,10 @@ def process_recording(payload):
         keywords = ["Community Support", "Group Coaching", "Flow Code"]
         update_notion(youtube_url, start_time, summary, keywords)
 
-        print(f"Pipeline complete for {call_date_display}: {youtube_url}")
+        log.info(f"Pipeline complete for {call_date_display}: {youtube_url}")
 
     except Exception as e:
-        print(f"Pipeline error: {e}")
+        log.error(f"Pipeline error: {e}", exc_info=True)
         raise
 
 
