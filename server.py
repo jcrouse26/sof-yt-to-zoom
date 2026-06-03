@@ -241,6 +241,23 @@ def health():
     return jsonify({"status": "ok"})
 
 
+@app.route("/test-notifications", methods=["POST"])
+def test_notifications():
+    """Test Slack + Notion without downloading or uploading anything."""
+    youtube_url = "https://www.youtube.com/watch?v=TEST123"
+    call_date = "2026-06-03"
+    summary = "Test notification — verifying Slack and Notion integration."
+    fireflies_url = "https://app.fireflies.ai/view/test"
+    keywords = ["Test", "Community Support", "Flow Code"]
+    try:
+        post_to_slack(youtube_url, fireflies_url, call_date, summary)
+        update_notion(youtube_url, call_date, summary, keywords)
+        return jsonify({"status": "ok", "youtube_url": youtube_url})
+    except Exception as e:
+        log.error(f"Test notification error: {e}", exc_info=True)
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
 @app.route("/zoom-webhook", methods=["POST"])
 def zoom_webhook():
     payload = request.get_json(force=True)
