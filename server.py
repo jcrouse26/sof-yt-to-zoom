@@ -315,7 +315,6 @@ def test_notifications():
     fireflies_url = "https://app.fireflies.ai/view/test"
     keywords = ["Test", "Community Support", "Flow Code"]
     try:
-        post_to_slack(youtube_url, fireflies_url, call_date, summary, keywords)
         update_notion(youtube_url, call_date, summary, keywords)
         return jsonify({"status": "ok", "youtube_url": youtube_url})
     except Exception as e:
