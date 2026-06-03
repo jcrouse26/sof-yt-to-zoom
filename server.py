@@ -19,15 +19,15 @@ from googleapiclient.http import MediaFileUpload
 
 app = Flask(__name__)
 
-# ── Env vars ────────────────────────────────────────────────────────────────
-ZOOM_WEBHOOK_SECRET     = os.environ["ZOOM_WEBHOOK_SECRET"]
-SLACK_BOT_TOKEN         = os.environ["SLACK_BOT_TOKEN"]
-SLACK_CHANNEL_ID        = os.environ["SLACK_CHANNEL_ID"]          # C09J0ERKWCS
-NOTION_TOKEN            = os.environ["NOTION_TOKEN"]
-NOTION_DB_ID            = os.environ["NOTION_DB_ID"]              # 0a70c127-...
-YOUTUBE_TOKEN_JSON      = os.environ["YOUTUBE_TOKEN_JSON"]         # full JSON string
-PERSONAL_ROOM_TOPIC     = os.environ.get("PERSONAL_ROOM_TOPIC", "Jason Crouse's Personal Meeting Room")
-MIN_DURATION_MINUTES    = int(os.environ.get("MIN_DURATION_MINUTES", "90"))
+# ── Env vars (loaded lazily so missing vars don't crash startup) ─────────────
+def env(key, default=None):
+    val = os.environ.get(key, default)
+    if val is None:
+        raise RuntimeError(f"Missing required env var: {key}")
+    return val
+
+PERSONAL_ROOM_TOPIC  = os.environ.get("PERSONAL_ROOM_TOPIC", "Jason Crouse's Personal Meeting Room")
+MIN_DURATION_MINUTES = int(os.environ.get("MIN_DURATION_MINUTES", "90"))
 
 # ── Zoom webhook verification ────────────────────────────────────────────────
 def verify_zoom_signature(request):
@@ -37,7 +37,7 @@ def verify_zoom_signature(request):
     body = request.get_data(as_text=True)
     message = f"v0:{timestamp}:{body}"
     expected = "v0=" + hmac.new(
-        ZOOM_WEBHOOK_SECRET.encode(),
+        env("ZOOM_WEBHOOK_SECRET").encode(),
         message.encode(),
         hashlib.sha256
     ).hexdigest()
@@ -47,7 +47,7 @@ def verify_zoom_signature(request):
 
 # ── YouTube ──────────────────────────────────────────────────────────────────
 def get_youtube_service():
-    token_data = json.loads(YOUTUBE_TOKEN_JSON)
+    token_data = json.loads(env("YOUTUBE_TOKEN_JSON"))
     creds = Credentials.from_authorized_user_info(token_data)
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
@@ -88,20 +88,20 @@ def post_to_slack(youtube_url, fireflies_url, call_date, summary):
     )
     requests.post(
         "https://slack.com/api/chat.postMessage",
-        headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
-        json={"channel": SLACK_CHANNEL_ID, "text": message},
+        headers={"Authorization": f"Bearer {env('SLACK_BOT_TOKEN')}"},
+        json={"channel": env("SLACK_CHANNEL_ID"), "text": message},
     )
 
 
 # ── Notion ───────────────────────────────────────────────────────────────────
 def update_notion(youtube_url, call_date, summary, keywords):
     headers = {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Authorization": f"Bearer {env('NOTION_TOKEN')}",
         "Notion-Version": "2022-06-28",
         "Content-Type": "application/json",
     }
     data = {
-        "parent": {"database_id": NOTION_DB_ID},
+        "parent": {"database_id": env("NOTION_DB_ID")},
         "properties": {
             "Call Title": {"title": [{"text": {"content": f"TFC Group Coaching — {call_date}"}}]},
             "Date": {"date": {"start": call_date}},
@@ -208,7 +208,7 @@ def zoom_webhook():
     if payload.get("event") == "endpoint.url_validation":
         token = payload["payload"]["plainToken"]
         hash_val = hmac.new(
-            ZOOM_WEBHOOK_SECRET.encode(), token.encode(), hashlib.sha256
+            env("ZOOM_WEBHOOK_SECRET").encode(), token.encode(), hashlib.sha256
         ).hexdigest()
         return jsonify({"plainToken": token, "encryptedToken": hash_val})
 
