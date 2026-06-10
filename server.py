@@ -106,6 +106,7 @@ def get_fireflies_summary(call_date):
       transcripts(fromDate: $fromDate, toDate: $toDate) {
         id
         title
+        duration
         summary {
           short_summary
           keywords
@@ -132,16 +133,17 @@ def get_fireflies_summary(call_date):
         return None, [], None
     transcripts = r.json().get("data", {}).get("transcripts", [])
 
-    # Find the group coaching call (longest call or title match)
+    # Find the group coaching call — prefer title match, fall back to longest duration
     group_call = None
     for t in transcripts:
         title = (t.get("title") or "").lower()
-        if "group call" in title or "flow code" in title or "group coaching" in title:
+        if "group call" in title or "flow code" in title or "group coaching" in title or title == "tfc":
             group_call = t
             break
 
     if not group_call and transcripts:
-        group_call = transcripts[0]
+        # Pick the longest transcript — group coaching is always the longest call
+        group_call = max(transcripts, key=lambda t: t.get("duration") or 0)
 
     if not group_call or not group_call.get("summary"):
         log.warning("No Fireflies summary found for this date")
@@ -229,7 +231,7 @@ def process_recording(payload):
             return
 
         # Convert UTC start time to Pacific time for display
-        from datetime import timezone
+        from datetime import datetime, timezone
         from zoneinfo import ZoneInfo
         utc_start = meeting.get("start_time", "")
         try:
