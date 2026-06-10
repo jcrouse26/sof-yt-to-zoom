@@ -228,12 +228,11 @@ def process_recording(payload):
 
         # Convert UTC start time to Pacific time for display
         from datetime import timezone
-        import pytz
+        from zoneinfo import ZoneInfo
         utc_start = meeting.get("start_time", "")
         try:
             dt_utc = datetime.strptime(utc_start, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-            pacific = pytz.timezone("America/Los_Angeles")
-            dt_pacific = dt_utc.astimezone(pacific)
+            dt_pacific = dt_utc.astimezone(ZoneInfo("America/Los_Angeles"))
             start_time = dt_pacific.strftime("%Y-%m-%d")
             call_date_display = dt_pacific.strftime("%B %-d, %Y")  # e.g. "June 2, 2026"
         except Exception:
