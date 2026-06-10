@@ -445,6 +445,39 @@ def post_notifications():
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
+@app.route("/update-notion", methods=["POST"])
+def update_notion_only():
+    """Update Notion only (no Slack) for a recording that already uploaded to YouTube.
+    Body: {"youtube_url": "...", "date": "YYYY-MM-DD", "transcript_id": "optional"}
+    """
+    body = request.get_json(force=True) or {}
+    youtube_url = body.get("youtube_url")
+    date = body.get("date")
+    transcript_id = body.get("transcript_id")
+    if not youtube_url or not date:
+        return jsonify({"error": "youtube_url and date required"}), 400
+    try:
+        if transcript_id:
+            summary, keywords, fireflies_url = get_fireflies_summary_by_id(transcript_id)
+        else:
+            summary, keywords, fireflies_url = get_fireflies_summary(date)
+        if not summary:
+            summary = "Weekly TFC Flow Code Group Coaching Call."
+        if not keywords:
+            keywords = ["Community Support", "Group Coaching", "Flow Code"]
+        from datetime import datetime
+        try:
+            call_date_display = datetime.strptime(date, "%Y-%m-%d").strftime("%B %-d, %Y")
+        except Exception:
+            call_date_display = date
+        update_notion(youtube_url, date, summary, keywords,
+                      fireflies_url=fireflies_url, call_date_display=call_date_display)
+        return jsonify({"status": "ok", "title": f"TFC Group Coaching — {call_date_display}"}), 200
+    except Exception as e:
+        log.error(f"update-notion error: {e}", exc_info=True)
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
 @app.route("/manual-trigger/<date>", methods=["POST"])
 def manual_trigger(date):
     """Manually trigger pipeline for a given date (YYYY-MM-DD).
