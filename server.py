@@ -159,6 +159,43 @@ def get_fireflies_summary(call_date):
     return short_summary, keywords, fireflies_url
 
 
+def get_fireflies_summary_by_id(transcript_id):
+    """Fetch summary directly by transcript ID."""
+    query = """
+    query($id: String!) {
+      transcript(id: $id) {
+        id
+        title
+        summary {
+          short_summary
+          keywords
+        }
+      }
+    }
+    """
+    r = requests.post(
+        "https://api.fireflies.ai/graphql",
+        headers={"Authorization": f"Bearer {env('FIREFLIES_API_KEY')}",
+                 "Content-Type": "application/json"},
+        json={"query": query, "variables": {"id": transcript_id}},
+        timeout=30
+    )
+    if r.status_code != 200:
+        log.warning(f"Fireflies API returned {r.status_code}")
+        return None, [], None
+    t = r.json().get("data", {}).get("transcript", {})
+    if not t or not t.get("summary"):
+        return None, [], None
+    summary_obj = t["summary"]
+    short_summary = summary_obj.get("short_summary", "")
+    keywords = summary_obj.get("keywords", [])
+    if isinstance(keywords, str):
+        keywords = [k.strip() for k in keywords.split(",")]
+    fireflies_url = f"https://app.fireflies.ai/view/{transcript_id}"
+    log.info(f"Fetched Fireflies transcript by ID: {t.get('title')}")
+    return short_summary, keywords, fireflies_url
+
+
 # ── Slack ────────────────────────────────────────────────────────────────────
 def post_to_slack(youtube_url, fireflies_url, call_date, summary, keywords):
     themes = ", ".join(keywords) if keywords else ""
@@ -364,15 +401,19 @@ def zoom_webhook():
 @app.route("/post-notifications", methods=["POST"])
 def post_notifications():
     """Post Slack + Notion for a recording that already uploaded to YouTube.
-    Body: {"youtube_url": "...", "date": "YYYY-MM-DD"}
+    Body: {"youtube_url": "...", "date": "YYYY-MM-DD", "transcript_id": "optional"}
     """
     body = request.get_json(force=True) or {}
     youtube_url = body.get("youtube_url")
     date = body.get("date")
+    transcript_id = body.get("transcript_id")
     if not youtube_url or not date:
         return jsonify({"error": "youtube_url and date required"}), 400
     try:
-        summary, keywords, fireflies_url = get_fireflies_summary(date)
+        if transcript_id:
+            summary, keywords, fireflies_url = get_fireflies_summary_by_id(transcript_id)
+        else:
+            summary, keywords, fireflies_url = get_fireflies_summary(date)
         if not summary:
             summary = "Weekly TFC Flow Code Group Coaching Call."
         if not keywords:
