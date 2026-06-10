@@ -127,7 +127,9 @@ def get_fireflies_summary(call_date):
         json={"query": query, "variables": {"fromDate": from_date, "toDate": to_date}},
         timeout=30
     )
-    r.raise_for_status()
+    if r.status_code != 200:
+        log.warning(f"Fireflies API returned {r.status_code} — skipping summary")
+        return None, [], None
     transcripts = r.json().get("data", {}).get("transcripts", [])
 
     # Find the group coaching call (longest call or title match)
