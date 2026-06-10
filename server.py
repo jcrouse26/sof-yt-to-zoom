@@ -357,6 +357,47 @@ def zoom_webhook():
     return jsonify({"status": "received"}), 200
 
 
+@app.route("/manual-trigger/<date>", methods=["POST"])
+def manual_trigger(date):
+    """Manually trigger pipeline for a given date (YYYY-MM-DD).
+    Fetches the Zoom recording from that date and runs the full pipeline.
+    Example: POST /manual-trigger/2026-06-09
+    """
+    try:
+        zoom_token = get_zoom_token()
+        r = requests.get(
+            "https://api.zoom.us/v2/users/me/recordings",
+            headers={"Authorization": f"Bearer {zoom_token}"},
+            params={"from": date, "to": date, "page_size": 10},
+            timeout=30,
+        )
+        r.raise_for_status()
+        meetings = r.json().get("meetings", [])
+        if not meetings:
+            return jsonify({"error": f"No recordings found for {date}"}), 404
+
+        # Find the longest meeting (most likely the group coaching call)
+        meeting = max(meetings, key=lambda m: m.get("duration", 0))
+        log.info(f"Manual trigger: found meeting '{meeting.get('topic')}' duration={meeting.get('duration')}m")
+
+        # Reconstruct a webhook-compatible payload and run the pipeline
+        payload = {"payload": {"object": meeting}}
+        thread = threading.Thread(target=process_recording, args=(payload,))
+        thread.daemon = True
+        thread.start()
+
+        return jsonify({
+            "status": "triggered",
+            "topic": meeting.get("topic"),
+            "duration": meeting.get("duration"),
+            "date": date,
+        }), 200
+
+    except Exception as e:
+        log.error(f"Manual trigger error: {e}", exc_info=True)
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
