@@ -219,21 +219,30 @@ def post_to_slack(youtube_url, fireflies_url, call_date, summary, keywords):
 
 
 # ── Notion ───────────────────────────────────────────────────────────────────
-def update_notion(youtube_url, call_date, summary, keywords):
+def update_notion(youtube_url, call_date, summary, keywords, fireflies_url=None, call_date_display=None):
+    from datetime import datetime as _dt
+    if not call_date_display:
+        try:
+            call_date_display = _dt.strptime(call_date, "%Y-%m-%d").strftime("%B %-d, %Y")
+        except Exception:
+            call_date_display = call_date
     headers = {
         "Authorization": f"Bearer {env('NOTION_TOKEN')}",
         "Notion-Version": "2022-06-28",
         "Content-Type": "application/json",
     }
+    properties = {
+        "Call Title": {"title": [{"text": {"content": f"TFC Group Coaching — {call_date_display}"}}]},
+        "Date": {"date": {"start": call_date}},
+        "Theme / Topic": {"rich_text": [{"text": {"content": ", ".join(keywords)}}]},
+        "Recording Link": {"url": youtube_url},
+        "Status": {"select": {"name": "Complete"}},
+    }
+    if fireflies_url and fireflies_url != "https://app.fireflies.ai":
+        properties["Fireflies Link"] = {"url": fireflies_url}
     data = {
         "parent": {"database_id": env("NOTION_DB_ID")},
-        "properties": {
-            "Call Title": {"title": [{"text": {"content": f"TFC Group Coaching — {call_date}"}}]},
-            "Date": {"date": {"start": call_date}},
-            "Theme / Topic": {"rich_text": [{"text": {"content": ", ".join(keywords)}}]},
-            "Recording Link": {"url": youtube_url},
-            "Status": {"select": {"name": "Complete"}},
-        },
+        "properties": properties,
         "children": [
             {"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"text": {"content": "Session Notes"}}]}},
             {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"text": {"content": summary}}]}},
@@ -342,7 +351,8 @@ def process_recording(payload):
         post_to_slack(youtube_url, fireflies_url, call_date_display, summary, keywords)
 
         # Update Notion
-        update_notion(youtube_url, start_time, summary, keywords)
+        update_notion(youtube_url, start_time, summary, keywords,
+                      fireflies_url=fireflies_url, call_date_display=call_date_display)
 
         log.info(f"Pipeline complete for {call_date_display}: {youtube_url}")
 
@@ -427,7 +437,8 @@ def post_notifications():
         except Exception:
             call_date_display = date
         post_to_slack(youtube_url, fireflies_url, call_date_display, summary, keywords)
-        update_notion(youtube_url, date, summary, keywords)
+        update_notion(youtube_url, date, summary, keywords,
+                      fireflies_url=fireflies_url, call_date_display=call_date_display)
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         log.error(f"post-notifications error: {e}", exc_info=True)
