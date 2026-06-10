@@ -359,6 +359,38 @@ def zoom_webhook():
     return jsonify({"status": "received"}), 200
 
 
+@app.route("/post-notifications", methods=["POST"])
+def post_notifications():
+    """Post Slack + Notion for a recording that already uploaded to YouTube.
+    Body: {"youtube_url": "...", "date": "YYYY-MM-DD"}
+    """
+    body = request.get_json(force=True) or {}
+    youtube_url = body.get("youtube_url")
+    date = body.get("date")
+    if not youtube_url or not date:
+        return jsonify({"error": "youtube_url and date required"}), 400
+    try:
+        summary, keywords, fireflies_url = get_fireflies_summary(date)
+        if not summary:
+            summary = "Weekly TFC Flow Code Group Coaching Call."
+        if not keywords:
+            keywords = ["Community Support", "Group Coaching", "Flow Code"]
+        if not fireflies_url:
+            fireflies_url = "https://app.fireflies.ai"
+        from zoneinfo import ZoneInfo
+        from datetime import datetime
+        try:
+            call_date_display = datetime.strptime(date, "%Y-%m-%d").strftime("%B %-d, %Y")
+        except Exception:
+            call_date_display = date
+        post_to_slack(youtube_url, fireflies_url, call_date_display, summary, keywords)
+        update_notion(youtube_url, date, summary, keywords)
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        log.error(f"post-notifications error: {e}", exc_info=True)
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
 @app.route("/manual-trigger/<date>", methods=["POST"])
 def manual_trigger(date):
     """Manually trigger pipeline for a given date (YYYY-MM-DD).
