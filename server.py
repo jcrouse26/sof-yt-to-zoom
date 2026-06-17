@@ -154,7 +154,7 @@ def format_youtube_description(call_date_display, chapters):
 def update_youtube_description(youtube_url, description):
     """Update an existing YouTube video's description."""
     import re
-    m = re.search(r"v=([A-Za-z0-9_-]+)", youtube_url)
+    m = re.search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]+)", youtube_url)
     if not m:
         log.warning(f"Could not extract video ID from {youtube_url}")
         return
