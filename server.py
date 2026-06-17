@@ -98,6 +98,82 @@ def upload_to_youtube(file_path, title, description="", privacy="unlisted"):
     return f"https://www.youtube.com/watch?v={response['id']}"
 
 
+# ── Timestamp / chapter helpers ─────────────────────────────────────────────
+def parse_chapters(shorthand_bullet):
+    """Parse Fireflies shorthand_bullet into YouTube-style chapter timestamps.
+
+    Fireflies format: emoji **Title** (MM:SS - MM:SS)  or  (H:MM:SS - H:MM:SS)
+    YouTube format:   0:00 Title
+                      9:36 Next Topic
+                      1:12:17 Late Topic
+    Returns list of (yt_time_str, title) tuples, sorted by time.
+    First chapter is always forced to 0:00 (YouTube requirement).
+    """
+    import re
+    if not shorthand_bullet:
+        return []
+
+    pattern = r'\*\*(.+?)\*\*\s*\((\d+:\d+(?::\d+)?)\s*-\s*\d+:\d+(?::\d+)?\)'
+    chapters = []
+    seen = set()
+
+    for m in re.finditer(pattern, shorthand_bullet):
+        title = m.group(1).strip()
+        parts = m.group(2).split(":")
+        if len(parts) == 2:
+            total = int(parts[0]) * 60 + int(parts[1])
+        elif len(parts) == 3:
+            total = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        else:
+            continue
+        if total in seen:
+            continue
+        seen.add(total)
+        if total < 3600:
+            yt = f"{total // 60}:{total % 60:02d}"
+        else:
+            h = total // 3600
+            yt = f"{h}:{(total % 3600) // 60:02d}:{total % 60:02d}"
+        chapters.append((yt, title, total))
+
+    chapters.sort(key=lambda x: x[2])
+    if chapters and chapters[0][2] > 0:
+        chapters[0] = ("0:00", chapters[0][1], 0)
+    return [(yt, title) for yt, title, _ in chapters]
+
+
+def format_youtube_description(call_date_display, chapters):
+    """Build a YouTube video description including chapter timestamps."""
+    desc = f"TFC Flow Code — weekly group coaching call archived for community members.\n\nDate: {call_date_display}"
+    if chapters:
+        lines = "\n".join(f"{t} {title}" for t, title in chapters)
+        desc += f"\n\nTIMESTAMPS\n{lines}"
+    return desc
+
+
+def update_youtube_description(youtube_url, description):
+    """Update an existing YouTube video's description."""
+    import re
+    m = re.search(r"v=([A-Za-z0-9_-]+)", youtube_url)
+    if not m:
+        log.warning(f"Could not extract video ID from {youtube_url}")
+        return
+    video_id = m.group(1)
+    try:
+        youtube = get_youtube_service()
+        current = youtube.videos().list(part="snippet", id=video_id).execute()
+        items = current.get("items", [])
+        if not items:
+            log.warning(f"YouTube video {video_id} not found")
+            return
+        snippet = items[0]["snippet"]
+        snippet["description"] = description
+        youtube.videos().update(part="snippet", body={"id": video_id, "snippet": snippet}).execute()
+        log.info(f"YouTube description updated for {video_id}")
+    except Exception as e:
+        log.warning(f"YouTube description update failed: {e}")
+
+
 # ── Fireflies ────────────────────────────────────────────────────────────────
 def get_fireflies_summary(call_date):
     """Fetch summary and keywords for the group coaching call on a given date."""
@@ -110,7 +186,7 @@ def get_fireflies_summary(call_date):
         summary {
           short_summary
           keywords
-          bullet_gist
+          shorthand_bullet
         }
       }
     }
@@ -147,7 +223,7 @@ def get_fireflies_summary(call_date):
 
     if not group_call or not group_call.get("summary"):
         log.warning("No Fireflies summary found for this date")
-        return None, [], None
+        return None, [], None, []
 
     summary_obj = group_call["summary"]
     short_summary = summary_obj.get("short_summary", "")
@@ -155,8 +231,9 @@ def get_fireflies_summary(call_date):
     if isinstance(keywords, str):
         keywords = [k.strip() for k in keywords.split(",")]
     fireflies_url = f"https://app.fireflies.ai/view/{group_call['id']}"
-    log.info(f"Found Fireflies transcript: {group_call['title']}")
-    return short_summary, keywords, fireflies_url
+    chapters = parse_chapters(summary_obj.get("shorthand_bullet", ""))
+    log.info(f"Found Fireflies transcript: {group_call['title']} ({len(chapters)} chapters)")
+    return short_summary, keywords, fireflies_url, chapters
 
 
 def get_fireflies_summary_by_id(transcript_id):
@@ -169,6 +246,7 @@ def get_fireflies_summary_by_id(transcript_id):
         summary {
           short_summary
           keywords
+          shorthand_bullet
         }
       }
     }
@@ -182,18 +260,19 @@ def get_fireflies_summary_by_id(transcript_id):
     )
     if r.status_code != 200:
         log.warning(f"Fireflies API returned {r.status_code}")
-        return None, [], None
+        return None, [], None, []
     t = r.json().get("data", {}).get("transcript", {})
     if not t or not t.get("summary"):
-        return None, [], None
+        return None, [], None, []
     summary_obj = t["summary"]
     short_summary = summary_obj.get("short_summary", "")
     keywords = summary_obj.get("keywords", [])
     if isinstance(keywords, str):
         keywords = [k.strip() for k in keywords.split(",")]
     fireflies_url = f"https://app.fireflies.ai/view/{transcript_id}"
-    log.info(f"Fetched Fireflies transcript by ID: {t.get('title')}")
-    return short_summary, keywords, fireflies_url
+    chapters = parse_chapters(summary_obj.get("shorthand_bullet", ""))
+    log.info(f"Fetched Fireflies transcript by ID: {t.get('title')} ({len(chapters)} chapters)")
+    return short_summary, keywords, fireflies_url, chapters
 
 
 # ── Slack ────────────────────────────────────────────────────────────────────
@@ -219,7 +298,7 @@ def post_to_slack(youtube_url, fireflies_url, call_date, summary, keywords):
 
 
 # ── Notion ───────────────────────────────────────────────────────────────────
-def update_notion(youtube_url, call_date, summary, keywords, fireflies_url=None, call_date_display=None):
+def update_notion(youtube_url, call_date, summary, keywords, fireflies_url=None, call_date_display=None, chapters=None):
     from datetime import datetime as _dt
     if not call_date_display:
         try:
@@ -232,7 +311,7 @@ def update_notion(youtube_url, call_date, summary, keywords, fireflies_url=None,
         "Content-Type": "application/json",
     }
     properties = {
-        "Call Title": {"title": [{"text": {"content": f"TFC Group Coaching — {call_date_display}"}}]},
+        "Call Title": {"title": [{"text": {"content": f"TFC Group Call — {call_date_display}"}}]},
         "Date": {"date": {"start": call_date}},
         "Theme / Topic": {"rich_text": [{"text": {"content": ", ".join(keywords)}}]},
         "Recording Link": {"url": youtube_url},
@@ -240,18 +319,27 @@ def update_notion(youtube_url, call_date, summary, keywords, fireflies_url=None,
     }
     if fireflies_url and fireflies_url != "https://app.fireflies.ai":
         properties["Fireflies Link"] = {"url": fireflies_url}
+
+    children = [
+        {"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"text": {"content": "Session Notes"}}]}},
+        {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"text": {"content": summary}}]}},
+        {"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"text": {"content": "Key Themes"}}]}},
+        *[
+            {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"text": {"content": kw}}]}}
+            for kw in keywords
+        ],
+    ]
+    if chapters:
+        chapter_text = "\n".join(f"{t}  {title}" for t, title in chapters)
+        children += [
+            {"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"text": {"content": "Timestamps"}}]}},
+            {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"text": {"content": chapter_text}}]}},
+        ]
+
     data = {
         "parent": {"database_id": env("NOTION_DB_ID")},
         "properties": properties,
-        "children": [
-            {"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"text": {"content": "Session Notes"}}]}},
-            {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"text": {"content": summary}}]}},
-            {"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"text": {"content": "Key Themes"}}]}},
-            *[
-                {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"text": {"content": kw}}]}}
-                for kw in keywords
-            ],
-        ],
+        "children": children,
     }
     r = requests.post("https://api.notion.com/v1/pages", headers=headers, json=data)
     if r.status_code != 200:
@@ -304,16 +392,24 @@ def process_recording(payload):
 
         download_url = mp4_file["download_url"]
 
+        # Zoom webhook_download URLs require the download_token from the webhook payload,
+        # NOT a regular OAuth token. The token is at payload["download_token"].
+        download_token = payload.get("download_token") or payload.get("payload", {}).get("download_token")
+        if not download_token:
+            # Fall back to OAuth token (works for /v2/meetings/... API download URLs)
+            log.info("No download_token in payload — falling back to OAuth token")
+            download_token = get_zoom_token()
+        else:
+            log.info("Using webhook download_token for recording download")
+
         # Download MP4 to temp file
         log.info(f"Downloading recording for {call_date_display}...")
-        zoom_token = get_zoom_token()
-        log.info("Got Zoom OAuth token")
 
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             tmp_path = tmp.name
 
         with requests.get(download_url, stream=True, timeout=600,
-                          headers={"Authorization": f"Bearer {zoom_token}"}) as r:
+                          headers={"Authorization": f"Bearer {download_token}"}) as r:
             log.info(f"Download response: {r.status_code}, Content-Type: {r.headers.get('Content-Type')}, Content-Length: {r.headers.get('Content-Length')}")
             r.raise_for_status()
             content_type = r.headers.get('Content-Type', '')
@@ -330,7 +426,7 @@ def process_recording(payload):
         log.info(f"Downloaded to {tmp_path}, uploading to YouTube...")
 
         # Upload to YouTube
-        title = f"TFC Group Coaching Call — {call_date_display}"
+        title = f"TFC Group Call — {call_date_display}"
         description = "Weekly TFC Flow Code Group Coaching Call"
         youtube_url = upload_to_youtube(tmp_path, title, description)
         log.info(f"YouTube URL: {youtube_url}")
@@ -339,7 +435,7 @@ def process_recording(payload):
         os.unlink(tmp_path)
 
         # Pull Fireflies summary
-        summary, keywords, fireflies_url = get_fireflies_summary(start_time)
+        summary, keywords, fireflies_url, chapters = get_fireflies_summary(start_time)
         if not summary:
             summary = "Weekly TFC Flow Code Group Coaching Call."
         if not keywords:
@@ -347,12 +443,18 @@ def process_recording(payload):
         if not fireflies_url:
             fireflies_url = "https://app.fireflies.ai"
 
+        # Update YouTube description with chapters now that we have Fireflies data
+        if chapters:
+            desc = format_youtube_description(call_date_display, chapters)
+            update_youtube_description(youtube_url, desc)
+
         # Post to Slack
         post_to_slack(youtube_url, fireflies_url, call_date_display, summary, keywords)
 
         # Update Notion
         update_notion(youtube_url, start_time, summary, keywords,
-                      fireflies_url=fireflies_url, call_date_display=call_date_display)
+                      fireflies_url=fireflies_url, call_date_display=call_date_display,
+                      chapters=chapters)
 
         log.info(f"Pipeline complete for {call_date_display}: {youtube_url}")
 
@@ -421,24 +523,26 @@ def post_notifications():
         return jsonify({"error": "youtube_url and date required"}), 400
     try:
         if transcript_id:
-            summary, keywords, fireflies_url = get_fireflies_summary_by_id(transcript_id)
+            summary, keywords, fireflies_url, chapters = get_fireflies_summary_by_id(transcript_id)
         else:
-            summary, keywords, fireflies_url = get_fireflies_summary(date)
+            summary, keywords, fireflies_url, chapters = get_fireflies_summary(date)
         if not summary:
             summary = "Weekly TFC Flow Code Group Coaching Call."
         if not keywords:
             keywords = ["Community Support", "Group Coaching", "Flow Code"]
         if not fireflies_url:
             fireflies_url = "https://app.fireflies.ai"
-        from zoneinfo import ZoneInfo
         from datetime import datetime
         try:
             call_date_display = datetime.strptime(date, "%Y-%m-%d").strftime("%B %-d, %Y")
         except Exception:
             call_date_display = date
+        if chapters:
+            update_youtube_description(youtube_url, format_youtube_description(call_date_display, chapters))
         post_to_slack(youtube_url, fireflies_url, call_date_display, summary, keywords)
         update_notion(youtube_url, date, summary, keywords,
-                      fireflies_url=fireflies_url, call_date_display=call_date_display)
+                      fireflies_url=fireflies_url, call_date_display=call_date_display,
+                      chapters=chapters)
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         log.error(f"post-notifications error: {e}", exc_info=True)
@@ -458,9 +562,9 @@ def update_notion_only():
         return jsonify({"error": "youtube_url and date required"}), 400
     try:
         if transcript_id:
-            summary, keywords, fireflies_url = get_fireflies_summary_by_id(transcript_id)
+            summary, keywords, fireflies_url, chapters = get_fireflies_summary_by_id(transcript_id)
         else:
-            summary, keywords, fireflies_url = get_fireflies_summary(date)
+            summary, keywords, fireflies_url, chapters = get_fireflies_summary(date)
         if not summary:
             summary = "Weekly TFC Flow Code Group Coaching Call."
         if not keywords:
@@ -470,9 +574,13 @@ def update_notion_only():
             call_date_display = datetime.strptime(date, "%Y-%m-%d").strftime("%B %-d, %Y")
         except Exception:
             call_date_display = date
+        if chapters:
+            update_youtube_description(youtube_url, format_youtube_description(call_date_display, chapters))
         update_notion(youtube_url, date, summary, keywords,
-                      fireflies_url=fireflies_url, call_date_display=call_date_display)
-        return jsonify({"status": "ok", "title": f"TFC Group Coaching — {call_date_display}"}), 200
+                      fireflies_url=fireflies_url, call_date_display=call_date_display,
+                      chapters=chapters)
+        return jsonify({"status": "ok", "title": f"TFC Group Call — {call_date_display}",
+                        "chapters": len(chapters)}), 200
     except Exception as e:
         log.error(f"update-notion error: {e}", exc_info=True)
         return jsonify({"status": "error", "error": str(e)}), 500
