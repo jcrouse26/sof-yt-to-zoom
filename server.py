@@ -102,30 +102,51 @@ def upload_to_youtube(file_path, title, description="", privacy="unlisted"):
 def parse_chapters(shorthand_bullet):
     """Parse Fireflies shorthand_bullet into YouTube-style chapter timestamps.
 
-    Fireflies format: emoji **Title** (MM:SS - MM:SS)  or  (H:MM:SS - H:MM:SS)
-    YouTube format:   0:00 Title
-                      9:36 Next Topic
-                      1:12:17 Late Topic
-    Returns list of (yt_time_str, title) tuples, sorted by time.
-    First chapter is always forced to 0:00 (YouTube requirement).
+    Fireflies uses MM:SS for short calls and HH:MM for long calls (>1 hour).
+    We detect which format by checking if the max parsed value makes sense:
+    if treating as MM:SS yields < 10 minutes total for a multi-chapter call,
+    it's almost certainly HH:MM.
     """
     import re
     if not shorthand_bullet:
         return []
 
     pattern = r'\*\*(.+?)\*\*\s*\((\d+:\d+(?::\d+)?)\s*-\s*\d+:\d+(?::\d+)?\)'
-    chapters = []
-    seen = set()
+    raw = []
 
     for m in re.finditer(pattern, shorthand_bullet):
         title = m.group(1).strip()
         parts = m.group(2).split(":")
         if len(parts) == 2:
-            total = int(parts[0]) * 60 + int(parts[1])
+            # Could be MM:SS or HH:MM — resolve below
+            raw.append((title, int(parts[0]), int(parts[1]), None))
         elif len(parts) == 3:
             total = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            raw.append((title, None, None, total))
         else:
             continue
+
+    if not raw:
+        return []
+
+    # Detect HH:MM vs MM:SS for 2-part timestamps
+    # If max MM:SS interpretation < 600 seconds (10 min) and we have 3+ chapters → HH:MM
+    two_part = [(t, a, b) for t, a, b, fixed in raw if fixed is None]
+    use_hhmm = False
+    if two_part:
+        max_mmss = max(a * 60 + b for _, a, b in two_part)
+        if max_mmss < 600 and len(two_part) >= 3:
+            use_hhmm = True
+
+    chapters = []
+    seen = set()
+    for title, a, b, fixed in raw:
+        if fixed is not None:
+            total = fixed
+        elif use_hhmm:
+            total = a * 3600 + b * 60  # HH:MM → seconds
+        else:
+            total = a * 60 + b          # MM:SS → seconds
         if total in seen:
             continue
         seen.add(total)
@@ -625,6 +646,38 @@ def manual_trigger(date):
     except Exception as e:
         log.error(f"Manual trigger error: {e}", exc_info=True)
         return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/update-youtube-description", methods=["POST"])
+def update_yt_description_only():
+    """Update only the YouTube description — no Slack, no Notion.
+    Body: {"youtube_url": "...", "date": "YYYY-MM-DD", "transcript_id": "optional"}
+    """
+    body = request.get_json(force=True) or {}
+    youtube_url = body.get("youtube_url")
+    date = body.get("date")
+    transcript_id = body.get("transcript_id")
+    if not youtube_url or not date:
+        return jsonify({"error": "youtube_url and date required"}), 400
+    try:
+        if transcript_id:
+            _, _, _, chapters = get_fireflies_summary_by_id(transcript_id)
+        else:
+            _, _, _, chapters = get_fireflies_summary(date)
+        from datetime import datetime
+        try:
+            call_date_display = datetime.strptime(date, "%Y-%m-%d").strftime("%B %-d, %Y")
+        except Exception:
+            call_date_display = date
+        if not chapters:
+            return jsonify({"status": "no_chapters", "message": "No chapters found for this transcript"}), 200
+        desc = format_youtube_description(call_date_display, chapters)
+        update_youtube_description(youtube_url, desc)
+        return jsonify({"status": "ok", "chapters": len(chapters), "description": desc}), 200
+    except Exception as e:
+        log.error(f"update-youtube-description error: {e}", exc_info=True)
+        return jsonify({"status": "error", "error": str(e)}), 500
+
 
 
 if __name__ == "__main__":
