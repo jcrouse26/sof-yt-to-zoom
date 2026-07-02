@@ -218,16 +218,20 @@ def get_fireflies_summary(call_date):
     from_date = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
     to_date   = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    r = requests.post(
-        "https://api.fireflies.ai/graphql",
-        headers={"Authorization": f"Bearer {env('FIREFLIES_API_KEY')}",
-                 "Content-Type": "application/json"},
-        json={"query": query, "variables": {"fromDate": from_date, "toDate": to_date}},
-        timeout=30
-    )
+    try:
+        r = requests.post(
+            "https://api.fireflies.ai/graphql",
+            headers={"Authorization": f"Bearer {env('FIREFLIES_API_KEY')}",
+                     "Content-Type": "application/json"},
+            json={"query": query, "variables": {"fromDate": from_date, "toDate": to_date}},
+            timeout=30
+        )
+    except Exception as e:
+        log.warning(f"Fireflies request failed: {e}")
+        return None, [], None, []
     if r.status_code != 200:
         log.warning(f"Fireflies API returned {r.status_code} — skipping summary")
-        return None, [], None
+        return None, [], None, []
     transcripts = r.json().get("data", {}).get("transcripts", [])
 
     # Find the group coaching call — prefer title match, fall back to longest duration
@@ -272,13 +276,17 @@ def get_fireflies_summary_by_id(transcript_id):
       }
     }
     """
-    r = requests.post(
-        "https://api.fireflies.ai/graphql",
-        headers={"Authorization": f"Bearer {env('FIREFLIES_API_KEY')}",
-                 "Content-Type": "application/json"},
-        json={"query": query, "variables": {"id": transcript_id}},
-        timeout=30
-    )
+    try:
+        r = requests.post(
+            "https://api.fireflies.ai/graphql",
+            headers={"Authorization": f"Bearer {env('FIREFLIES_API_KEY')}",
+                     "Content-Type": "application/json"},
+            json={"query": query, "variables": {"id": transcript_id}},
+            timeout=30
+        )
+    except Exception as e:
+        log.warning(f"Fireflies request failed: {e}")
+        return None, [], None, []
     if r.status_code != 200:
         log.warning(f"Fireflies API returned {r.status_code}")
         return None, [], None, []
@@ -331,13 +339,16 @@ def update_notion(youtube_url, call_date, summary, keywords, fireflies_url=None,
         "Notion-Version": "2022-06-28",
         "Content-Type": "application/json",
     }
+    kw_list = [k.strip() for k in (keywords or []) if k.strip()]
     properties = {
         "Call Title": {"title": [{"text": {"content": f"TFC Group Call — {call_date_display}"}}]},
         "Date": {"date": {"start": call_date}},
-        "Theme / Topic": {"rich_text": [{"text": {"content": ", ".join(keywords)}}]},
+        "Theme / Topic": {"rich_text": [{"text": {"content": ", ".join(kw_list)}}]},
         "Recording Link": {"url": youtube_url},
         "Status": {"select": {"name": "Complete"}},
     }
+    if kw_list:
+        properties["Keywords"] = {"multi_select": [{"name": k[:100]} for k in kw_list]}
     if fireflies_url and fireflies_url != "https://app.fireflies.ai":
         properties["Fireflies Link"] = {"url": fireflies_url}
 
@@ -455,8 +466,13 @@ def process_recording(payload):
         # Clean up temp file
         os.unlink(tmp_path)
 
-        # Pull Fireflies summary
-        summary, keywords, fireflies_url, chapters = get_fireflies_summary(start_time)
+        # Pull Fireflies summary — wrapped so any network error never kills Slack/Notion
+        try:
+            summary, keywords, fireflies_url, chapters = get_fireflies_summary(start_time)
+        except Exception as e:
+            log.warning(f"Fireflies summary fetch failed (non-fatal): {e}")
+            summary, keywords, fireflies_url, chapters = None, [], None, []
+
         if not summary:
             summary = "Weekly TFC Flow Code Group Coaching Call."
         if not keywords:
