@@ -195,24 +195,140 @@ def update_youtube_description(youtube_url, description):
         log.warning(f"YouTube description update failed: {e}")
 
 
+# ── GitHub wiki context ──────────────────────────────────────────────────────
+GITHUB_RAW = "https://raw.githubusercontent.com/jcrouse26/ai-jason/main/wiki"
+WIKI_CONTEXT_FILES = ["Framework-Definitions.md", "Jason-Voice-Patterns.md"]
+
+_wiki_context_cache = None
+
+def load_tfc_context():
+    """Fetch TFC wiki context files from private GitHub repo. Cached per container lifetime."""
+    global _wiki_context_cache
+    if _wiki_context_cache:
+        return _wiki_context_cache
+    token = os.environ.get("GITHUB_TOKEN")
+    headers_gh = {"Authorization": f"token {token}"} if token else {}
+    chunks = []
+    for filename in WIKI_CONTEXT_FILES:
+        try:
+            r = requests.get(f"{GITHUB_RAW}/{filename}", headers=headers_gh, timeout=15)
+            if r.status_code == 200:
+                content = r.text
+                # Cap each file to avoid blowing context window
+                if len(content) > 8000:
+                    content = content[:8000] + "\n...[truncated]"
+                chunks.append(f"=== {filename} ===\n{content}")
+                log.info(f"Loaded wiki context: {filename} ({len(r.text):,} chars)")
+            else:
+                log.warning(f"Could not fetch {filename}: {r.status_code}")
+        except Exception as e:
+            log.warning(f"Wiki context fetch failed for {filename}: {e}")
+    _wiki_context_cache = "\n\n".join(chunks)
+    return _wiki_context_cache
+
+
+# ── Claude summary generation ────────────────────────────────────────────────
+def generate_tfc_summary(transcript_sentences, title, call_date, duration, tfc_context):
+    """Generate a TFC-aware summary, keywords, and action items via Claude."""
+    lines = [
+        f"[{int(s.get('start_time', 0))}s] {s.get('speaker_name', '?')}: {s.get('text', '')}"
+        for s in (transcript_sentences or [])
+    ]
+    transcript_text = "\n".join(lines)
+    if len(transcript_text) > 80000:
+        transcript_text = transcript_text[:80000] + "\n...[truncated]"
+
+    prompt = f"""You work for Jason Crouse, founder of The Flow Code (TFC). Write an internal call summary for the Notion archive and Slack — used for coaching context and call prep.
+
+WHAT THIS IS:
+A brief handoff note from someone who was in the room. Not a corporate summary.
+Something Jason could read and immediately remember the feel and substance of the call.
+
+VOICE RULES:
+- Do NOT use: explored, delved into, unpacked, covered, touched on, addressed, discussed, "the group reflected on," "participants shared," "insights were gained," "themes emerged"
+- Short declarative sentences. Be specific. If a framework was named, use its exact TFC name.
+- If Jason named something, say what it was. If a member had a breakthrough, name them.
+- Write like you know what the Four Horsemen are. Write like you know what Flow Not Force means.
+  Don't explain TFC concepts — just use the vocabulary.
+
+TFC VOCABULARY REFERENCE:
+{tfc_context}
+
+---
+
+CALL: {title}
+DATE: {call_date}
+DURATION: {duration:.0f} min
+
+FULL TRANSCRIPT:
+{transcript_text}
+
+---
+
+Produce exactly these two sections:
+
+SUMMARY:
+3-5 sentences. What actually happened — the arc, who showed up, what Jason did, the energy.
+Name members by first name when they were central. No bullet points. Write it like a note.
+
+KEYWORDS:
+10-20 comma-separated tags. Include TFC framework names, tools, themes. No member names.
+Example: Flow Not Force, Phase 3, 10-Minute Rule, Ideal Schedule, Four Horsemen, Accountability"""
+
+    try:
+        r = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": env("ANTHROPIC_API_KEY"),
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 800,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=60,
+        )
+        r.raise_for_status()
+        raw = r.json()["content"][0]["text"].strip()
+    except Exception as e:
+        log.warning(f"Claude summary generation failed: {e}")
+        return None, []
+
+    # Parse SUMMARY and KEYWORDS sections
+    summary, keywords_raw = "", ""
+    current = None
+    for line in raw.splitlines():
+        clean = line.strip().rstrip(":")
+        if clean.upper() == "SUMMARY":
+            current = "summary"
+        elif clean.upper() == "KEYWORDS":
+            current = "keywords"
+        elif current == "summary":
+            summary += (" " if summary else "") + line.strip()
+        elif current == "keywords":
+            keywords_raw += line.strip()
+
+    keywords = [k.strip() for k in keywords_raw.split(",") if k.strip()]
+    log.info(f"Claude summary generated ({len(keywords)} keywords)")
+    return summary.strip() or None, keywords
+
+
 # ── Fireflies ────────────────────────────────────────────────────────────────
 def get_fireflies_summary(call_date):
-    """Fetch summary and keywords for the group coaching call on a given date."""
+    """Fetch transcript + generate Claude summary for the group coaching call on a given date."""
     query = """
     query($fromDate: String, $toDate: String) {
       transcripts(fromDate: $fromDate, toDate: $toDate) {
         id
         title
         duration
-        summary {
-          short_summary
-          keywords
-          shorthand_bullet
-        }
+        sentences { speaker_name text start_time }
+        summary { shorthand_bullet }
       }
     }
     """
-    # Look in a 2-day window around the call date
     from datetime import datetime, timedelta
     dt = datetime.strptime(call_date, "%Y-%m-%d")
     from_date = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -241,38 +357,39 @@ def get_fireflies_summary(call_date):
         if "group call" in title or "flow code" in title or "group coaching" in title or title == "tfc":
             group_call = t
             break
-
     if not group_call and transcripts:
-        # Pick the longest transcript — group coaching is always the longest call
         group_call = max(transcripts, key=lambda t: t.get("duration") or 0)
 
-    if not group_call or not group_call.get("summary"):
-        log.warning("No Fireflies summary found for this date")
+    if not group_call:
+        log.warning("No Fireflies transcript found for this date")
         return None, [], None, []
 
-    summary_obj = group_call["summary"]
-    short_summary = summary_obj.get("short_summary", "")
-    keywords      = summary_obj.get("keywords", [])
-    if isinstance(keywords, str):
-        keywords = [k.strip() for k in keywords.split(",")]
-    fireflies_url = f"https://app.fireflies.ai/view/{group_call['id']}"
-    chapters = parse_chapters(summary_obj.get("shorthand_bullet", ""))
-    log.info(f"Found Fireflies transcript: {group_call['title']} ({len(chapters)} chapters)")
-    return short_summary, keywords, fireflies_url, chapters
+    transcript_id = group_call["id"]
+    title         = group_call.get("title", "TFC Group Call")
+    duration      = group_call.get("duration") or 0
+    sentences     = group_call.get("sentences") or []
+    fireflies_url = f"https://app.fireflies.ai/view/{transcript_id}"
+    chapters      = parse_chapters((group_call.get("summary") or {}).get("shorthand_bullet", ""))
+
+    log.info(f"Found Fireflies transcript: {title} ({len(sentences)} sentences, {len(chapters)} chapters)")
+
+    # Generate TFC-aware summary via Claude
+    tfc_context = load_tfc_context()
+    summary, keywords = generate_tfc_summary(sentences, title, call_date, duration, tfc_context)
+
+    return summary, keywords, fireflies_url, chapters
 
 
 def get_fireflies_summary_by_id(transcript_id):
-    """Fetch summary directly by transcript ID."""
+    """Fetch transcript by ID and generate Claude summary."""
     query = """
     query($id: String!) {
       transcript(id: $id) {
         id
         title
-        summary {
-          short_summary
-          keywords
-          shorthand_bullet
-        }
+        duration
+        sentences { speaker_name text start_time }
+        summary { shorthand_bullet }
       }
     }
     """
@@ -291,17 +408,24 @@ def get_fireflies_summary_by_id(transcript_id):
         log.warning(f"Fireflies API returned {r.status_code}")
         return None, [], None, []
     t = r.json().get("data", {}).get("transcript", {})
-    if not t or not t.get("summary"):
+    if not t:
         return None, [], None, []
-    summary_obj = t["summary"]
-    short_summary = summary_obj.get("short_summary", "")
-    keywords = summary_obj.get("keywords", [])
-    if isinstance(keywords, str):
-        keywords = [k.strip() for k in keywords.split(",")]
+
+    title     = t.get("title", "TFC Group Call")
+    duration  = t.get("duration") or 0
+    sentences = t.get("sentences") or []
     fireflies_url = f"https://app.fireflies.ai/view/{transcript_id}"
-    chapters = parse_chapters(summary_obj.get("shorthand_bullet", ""))
-    log.info(f"Fetched Fireflies transcript by ID: {t.get('title')} ({len(chapters)} chapters)")
-    return short_summary, keywords, fireflies_url, chapters
+    chapters = parse_chapters((t.get("summary") or {}).get("shorthand_bullet", ""))
+
+    log.info(f"Fetched Fireflies transcript by ID: {title} ({len(sentences)} sentences, {len(chapters)} chapters)")
+
+    tfc_context = load_tfc_context()
+    # Extract date from transcript_id if possible, else use today
+    from datetime import date as _date
+    call_date = _date.today().strftime("%Y-%m-%d")
+    summary, keywords = generate_tfc_summary(sentences, title, call_date, duration, tfc_context)
+
+    return summary, keywords, fireflies_url, chapters
 
 
 # ── Slack ────────────────────────────────────────────────────────────────────
