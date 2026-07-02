@@ -306,14 +306,25 @@ def get_fireflies_summary_by_id(transcript_id):
 
 # ── Slack ────────────────────────────────────────────────────────────────────
 def post_to_slack(youtube_url, fireflies_url, call_date, summary, keywords):
-    themes = ", ".join(keywords) if keywords else ""
-    message = f"📹 Recording {call_date}:\n{youtube_url}"
-    if themes:
-        message += f"\n\nSome themes: {themes}"
+    """Post a clean Slack notification. Skips sections when only fallback/no data available."""
+    lines = [
+        f"🎙️ *TFC Group Call — {call_date}*",
+        youtube_url,
+    ]
+
     if summary:
-        message += f"\n\n{summary}"
-    if fireflies_url:
-        message += f"\n\n🔥 Full transcript: {fireflies_url}"
+        lines.append(f"\n{summary}")
+
+    if keywords:
+        lines.append("  ·  ".join(keywords[:8]))
+
+    has_real_ff_url = bool(fireflies_url and fireflies_url != "https://app.fireflies.ai")
+    if has_real_ff_url:
+        lines.append(f"\n🔥 Full transcript: {fireflies_url}")
+    elif not summary:
+        lines.append("_(Transcript will be linked once Fireflies finishes processing)_")
+
+    message = "\n".join(lines)
     r = requests.post(
         "https://slack.com/api/chat.postMessage",
         headers={"Authorization": f"Bearer {env('SLACK_BOT_TOKEN')}"},
@@ -473,24 +484,20 @@ def process_recording(payload):
             log.warning(f"Fireflies summary fetch failed (non-fatal): {e}")
             summary, keywords, fireflies_url, chapters = None, [], None, []
 
-        if not summary:
-            summary = "Weekly TFC Flow Code Group Coaching Call."
-        if not keywords:
-            keywords = ["Community Support", "Group Coaching", "Flow Code"]
-        if not fireflies_url:
-            fireflies_url = "https://app.fireflies.ai"
-
         # Update YouTube description with chapters now that we have Fireflies data
         if chapters:
             desc = format_youtube_description(call_date_display, chapters)
             update_youtube_description(youtube_url, desc)
 
-        # Post to Slack
+        # Post to Slack — pass raw values so placeholder content isn't shown
         post_to_slack(youtube_url, fireflies_url, call_date_display, summary, keywords)
 
-        # Update Notion
-        update_notion(youtube_url, start_time, summary, keywords,
-                      fireflies_url=fireflies_url, call_date_display=call_date_display,
+        # Apply fallbacks only for Notion (needs non-null values for properties)
+        notion_summary  = summary  or "Weekly TFC Flow Code Group Coaching Call."
+        notion_keywords = keywords or ["Group Coaching", "Flow Code"]
+        notion_ff_url   = fireflies_url if (fireflies_url and fireflies_url != "https://app.fireflies.ai") else None
+        update_notion(youtube_url, start_time, notion_summary, notion_keywords,
+                      fireflies_url=notion_ff_url, call_date_display=call_date_display,
                       chapters=chapters)
 
         log.info(f"Pipeline complete for {call_date_display}: {youtube_url}")
@@ -563,12 +570,6 @@ def post_notifications():
             summary, keywords, fireflies_url, chapters = get_fireflies_summary_by_id(transcript_id)
         else:
             summary, keywords, fireflies_url, chapters = get_fireflies_summary(date)
-        if not summary:
-            summary = "Weekly TFC Flow Code Group Coaching Call."
-        if not keywords:
-            keywords = ["Community Support", "Group Coaching", "Flow Code"]
-        if not fireflies_url:
-            fireflies_url = "https://app.fireflies.ai"
         from datetime import datetime
         try:
             call_date_display = datetime.strptime(date, "%Y-%m-%d").strftime("%B %-d, %Y")
@@ -576,9 +577,14 @@ def post_notifications():
             call_date_display = date
         if chapters:
             update_youtube_description(youtube_url, format_youtube_description(call_date_display, chapters))
+        # Slack gets raw values — no placeholder fallbacks
         post_to_slack(youtube_url, fireflies_url, call_date_display, summary, keywords)
-        update_notion(youtube_url, date, summary, keywords,
-                      fireflies_url=fireflies_url, call_date_display=call_date_display,
+        # Notion gets fallbacks so properties are never null
+        notion_summary  = summary  or "Weekly TFC Flow Code Group Coaching Call."
+        notion_keywords = keywords or ["Group Coaching", "Flow Code"]
+        notion_ff_url   = fireflies_url if (fireflies_url and fireflies_url != "https://app.fireflies.ai") else None
+        update_notion(youtube_url, date, notion_summary, notion_keywords,
+                      fireflies_url=notion_ff_url, call_date_display=call_date_display,
                       chapters=chapters)
         return jsonify({"status": "ok"}), 200
     except Exception as e:
