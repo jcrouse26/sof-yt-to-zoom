@@ -316,7 +316,7 @@ Example: Flow Not Force, Phase 3, 10-Minute Rule, Ideal Schedule, Four Horsemen,
 
 
 # ── Fireflies ────────────────────────────────────────────────────────────────
-def get_fireflies_summary(call_date):
+def get_fireflies_summary(call_date, zoom_meeting_id=None):
     """Fetch transcript + generate Claude summary for the group coaching call on a given date."""
     query = """
     query($fromDate: String, $toDate: String) {
@@ -324,6 +324,7 @@ def get_fireflies_summary(call_date):
         id
         title
         duration
+        meeting_link
         sentences { speaker_name text start_time }
         summary { shorthand_bullet }
       }
@@ -350,13 +351,24 @@ def get_fireflies_summary(call_date):
         return None, [], None, []
     transcripts = r.json().get("data", {}).get("transcripts", [])
 
-    # Find the group coaching call — prefer title match, fall back to longest duration
+    # Find the group coaching call. The Fireflies title is unreliable — when Fred is
+    # manually invited into the personal-room Zoom call (no calendar event to name it
+    # from), Fireflies just titles the transcript with the date/time. So match on the
+    # Zoom meeting ID embedded in meeting_link first — that's the same personal room
+    # every week and can't collide with any other call. Title/duration are fallbacks
+    # for transcripts that never got a live meeting_link (e.g. manually uploaded MP4s).
     group_call = None
-    for t in transcripts:
-        title = (t.get("title") or "").lower()
-        if "group call" in title or "flow code" in title or "group coaching" in title or title == "tfc":
-            group_call = t
-            break
+    if zoom_meeting_id:
+        for t in transcripts:
+            if str(zoom_meeting_id) in (t.get("meeting_link") or ""):
+                group_call = t
+                break
+    if not group_call:
+        for t in transcripts:
+            title = (t.get("title") or "").lower()
+            if "group call" in title or "flow code" in title or "group coaching" in title or title == "tfc":
+                group_call = t
+                break
     if not group_call and transcripts:
         group_call = max(transcripts, key=lambda t: t.get("duration") or 0)
 
@@ -603,7 +615,7 @@ def process_recording(payload):
 
         # Pull Fireflies summary — wrapped so any network error never kills Slack/Notion
         try:
-            summary, keywords, fireflies_url, chapters = get_fireflies_summary(start_time)
+            summary, keywords, fireflies_url, chapters = get_fireflies_summary(start_time, zoom_meeting_id=meeting.get("id"))
         except Exception as e:
             log.warning(f"Fireflies summary fetch failed (non-fatal): {e}")
             summary, keywords, fireflies_url, chapters = None, [], None, []
